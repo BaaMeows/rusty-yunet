@@ -1,6 +1,6 @@
 #![warn(clippy::clone_on_ref_ptr, clippy::mod_module_files, clippy::todo)]
 
-use image::{buffer::ConvertBuffer, open, Bgr, ImageBuffer};
+use image::{buffer::ConvertBuffer, open, Pixel, Rgb, RgbImage};
 use serde::Serialize;
 use std::path::Path;
 use thiserror::Error;
@@ -166,12 +166,10 @@ impl Face {
     }
 }
 
-pub fn detect_faces<T: ConvertBuffer<ImageBuffer<Bgr<u8>, Vec<u8>>>>(
-    image_buffer: &T,
-) -> Result<Vec<Face>, YuNetError> {
-    let image_buffer = image_buffer.convert();
+pub fn detect_faces<T: ConvertBuffer<RgbImage>>(image_buffer: &T) -> Result<Vec<Face>, YuNetError> {
+    let mut image_buffer = image_buffer.convert();
+    image_buffer.swap_red_and_blue();
     let (width, height) = (image_buffer.width() as u16, image_buffer.height() as u16);
-
     let faces = unsafe {
         crate::ffi::wrapper_detect_faces(
             image_buffer.as_ptr(),
@@ -184,8 +182,25 @@ pub fn detect_faces<T: ConvertBuffer<ImageBuffer<Bgr<u8>, Vec<u8>>>>(
 }
 
 pub fn detect_faces_from_file(filename: impl AsRef<Path>) -> Result<Vec<Face>, YuNetError> {
-    let image_buffer = open(&filename)?.into_bgr8();
+    let image_buffer = open(&filename)?.into_rgb8();
     detect_faces(&image_buffer)
+}
+
+trait ColorspaceSwapExt {
+    fn swap_red_and_blue(&mut self) -> &mut RgbImage;
+}
+
+// Yunet expects a BGR image.
+// The Image crate doesn't have a BGR pixel type (anymore), but we can make a
+// BGR image by swapping the red and blue channels of an RGB image.
+impl ColorspaceSwapExt for RgbImage {
+    fn swap_red_and_blue(&mut self) -> &mut RgbImage {
+        for (_, _, pixel) in self.enumerate_pixels_mut() {
+            let sub_pixels: &[u8] = pixel.channels_mut();
+            *pixel = Rgb([sub_pixels[2], sub_pixels[1], sub_pixels[0]])
+        }
+        self
+    }
 }
 
 #[cfg(test)]
@@ -212,5 +227,32 @@ mod tests {
         assert_eq!(rect1.top, rect2.top);
         assert_eq!(rect1.width, rect2.width);
         assert_eq!(rect1.height, rect2.height);
+    }
+
+    #[test]
+    fn swap_red_and_blue_1px() {
+        let mut image: RgbImage = RgbImage::new(1, 1);
+        image.put_pixel(0, 0, Rgb([255, 127, 0]));
+
+        image.swap_red_and_blue();
+        assert_eq!(*image.get_pixel(0, 0), Rgb([0, 127, 255]));
+    }
+
+    #[test]
+    fn swap_red_and_blue_4px() {
+        let mut image_1: RgbImage = RgbImage::new(2, 2);
+        image_1.put_pixel(0, 0, Rgb([1, 2, 3]));
+        image_1.put_pixel(0, 1, Rgb([4, 5, 6]));
+        image_1.put_pixel(1, 0, Rgb([7, 8, 9]));
+        image_1.put_pixel(1, 1, Rgb([10, 11, 12]));
+
+        let mut image_2: RgbImage = RgbImage::new(2, 2);
+        image_2.put_pixel(0, 0, Rgb([3, 2, 1]));
+        image_2.put_pixel(0, 1, Rgb([6, 5, 4]));
+        image_2.put_pixel(1, 0, Rgb([9, 8, 7]));
+        image_2.put_pixel(1, 1, Rgb([12, 11, 10]));
+
+        image_1.swap_red_and_blue();
+        assert_eq!(image_1, image_2);
     }
 }
